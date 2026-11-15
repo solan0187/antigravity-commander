@@ -45,36 +45,26 @@ def github_api(url: str, token: str, method: str = "GET", data: dict = None):
 
 def gemini_api(path: str, api_key: str, method: str = "GET", data: dict = None):
     url = f"https://generativelanguage.googleapis.com/v1beta/{path}"
-    headers = {
-        "x-goog-api-key": api_key,
-    }
-    return http_json(url, headers, method=method, data=data)
+    return http_json(url, {"x-goog-api-key": api_key}, method=method, data=data)
 
 
 def get_authenticated_user(token: str) -> str:
-    user = github_api("https://api.github.com/user", token)
-    return user["login"]
+    return github_api("https://api.github.com/user", token)["login"]
 
 
 def find_target_issues(owner: str, token: str) -> list:
     query = urllib.parse.quote(f'user:{owner} is:issue is:open label:"{TARGET_LABEL}"')
     url = f"https://api.github.com/search/issues?q={query}&sort=created&order=asc&per_page={MAX_ISSUES_PER_RUN}"
-    result = github_api(url, token)
-    return result.get("items", [])
+    return github_api(url, token).get("items", [])
 
 
 def swap_labels(repo_full_name: str, issue_num: int, remove_label: str, add_label: str, token: str):
     if remove_label:
         try:
-            encoded_remove = urllib.parse.quote(remove_label)
-            github_api(
-                f"https://api.github.com/repos/{repo_full_name}/issues/{issue_num}/labels/{encoded_remove}",
-                token,
-                method="DELETE",
-            )
+            enc = urllib.parse.quote(remove_label)
+            github_api(f"https://api.github.com/repos/{repo_full_name}/issues/{issue_num}/labels/{enc}", token, method="DELETE")
         except Exception:
             pass
-
     if add_label:
         github_api(
             f"https://api.github.com/repos/{repo_full_name}/issues/{issue_num}/labels",
@@ -93,47 +83,62 @@ def post_comment(repo_full_name: str, issue_num: int, body: str, token: str):
     )
 
 
-def run_antigravity_agent(gemini_key: str, repo_full_name: str, default_branch: str, issue_num: int, github_token: str) -> str:
-    branch_name = f"fix/issue-{issue_num}-antigravity"
+def run_antigravity_agent(
+    gemini_key: str,
+    repo_full_name: str,
+    default_branch: str,
+    issue_num: int,
+    issue_title: str,
+    issue_body: str,
+    github_token: str,
+) -> str:
+    branch_name = f"fix/issue-{issue_num}"
 
-    prompt = f"""
-あなたは熟練のソフトウェアエンジニアです。
-サンドボックス環境内で以下の手順を実行し、GitHubのIssueを修正してプルリクエストを作成してください。
+    # 汎用AGENTS.mdのルール（スタック自動判別・探索制限・最小差分・出力圧縮）をすべて統合したプロンプト
+    prompt = f"""Fix GitHub issue #{issue_num} in `{repo_full_name}` (base: `{default_branch}`, head: `{branch_name}`).
 
-【対象情報】
-- リポジトリ: {repo_full_name}
-- 対象Issue番号: #{issue_num}
-- ベースブランチ: {default_branch}
-- 作業ブランチ名: {branch_name}
+[ISSUE #{issue_num}: {issue_title}]
+{issue_body}
 
-【実行ステップ】
-1. Git認証とリポジトリのクローン
-   - 以下の環境変数を設定する:
-     `export GITHUB_TOKEN="{github_token}"`
-     `export GH_TOKEN="{github_token}"`
-   - トークンをURLに出さずに認証設定を行う:
-     `git config --global url."https://x-access-token:${{GITHUB_TOKEN}}@github.com/".insteadOf "https://github.com/"`
-   - `git config --global user.name "Antigravity Bot"`
-   - `git config --global user.email "antigravity-bot@users.noreply.github.com"`
-   - `git clone https://github.com/{repo_full_name}.git` を実行してディレクトリへ移動する。
-   - `gh issue view {issue_num}` を実行してIssueのタイトル・本文・コメントを読み込む。
-     （※ `gh` コマンドが未インストールの場合は、Pythonの `urllib.request` で `https://api.github.com/repos/{repo_full_name}/issues/{issue_num}` と `/comments` に `Authorization: Bearer $GITHUB_TOKEN` ヘッダを付けてGETリクエストし取得すること）
+[UNIVERSAL EXECUTION & TOKEN-SAVING RULES - STRICT]
+1. Clone & Fast Stack Detection:
+   export GITHUB_TOKEN="{github_token}" GH_TOKEN="{github_token}"
+   git config --global url."https://x-access-token:${{GITHUB_TOKEN}}@github.com/".insteadOf "https://github.com/"
+   git config --global user.name "Antigravity Bot"
+   git config --global user.email "antigravity-bot@users.noreply.github.com"
+   git clone --depth 1 -b {default_branch} https://github.com/{repo_full_name}.git repo && cd repo
+   Check root files ONLY (`ls -1`) to identify stack & test command immediately:
+   - `package.json` -> Node/TS/JS (`npm test --silent` or `npx tsc --noEmit`)
+   - `build.gradle*` -> Android/Kotlin/Java (`./gradlew test --quiet | tail -n 30`)
+   - `pubspec.yaml` -> Flutter/Dart (`flutter test | tail -n 30`)
+   - `pyproject.toml` / `requirements.txt` -> Python (`pytest -q`)
+   - `Cargo.toml` -> Rust (`cargo check -q`)
+   - `go.mod` -> Go (`go test ./...`)
+   (If a repo-specific `AGENTS.md` exists, prioritize its instructions.)
 
-2. コード調査と修正実装
-   - Issueの要件やバグを把握し、関連コードを調査して修正する。
-   - セキュリティ上、`.github/workflows/` 配下のファイルは絶対に変更しないこと。
+2. Minimal Context Navigation:
+   - NEVER `cat` entire large files or scan `.git`, `node_modules`, `build`, `.gradle`, `dist`, `.dart_tool`, or `vendor`.
+   - Locate targets via `grep -rn "<keyword>" . --exclude-dir={{.git,node_modules,build,.gradle,dist,.dart_tool,vendor}}` and read ONLY surrounding lines with `sed -n 'X,Yp'`.
 
-3. ビルド・テストの検証
-   - リポジトリ内のテストやビルドコマンドを探して実行し、問題がないことを確認する。
+3. Root-Cause Fix & Quiet Verification:
+   - Identify the exact cause before editing. Produce the smallest possible diff without reformatting unrelated code.
+   - NEVER add external dependencies, upgrade lockfiles, or touch `.github/workflows/`.
+   - Preserve existing public APIs, signatures, and coding style.
+   - Always pipe build/test outputs through `| tail -n 30` to avoid log bloat.
 
-4. コミットとPR作成
-   - `git checkout -B {branch_name}` で作業ブランチを作成し、変更をコミットして `git push -u origin {branch_name}` でpushする。
-   - `gh pr create --base {default_branch} --head {branch_name} --title "Fix #{issue_num}" --body "..."` でPRを作成する。
-     （※ `gh` コマンドが使えない場合は、Pythonの `urllib.request` で `https://api.github.com/repos/{repo_full_name}/pulls` に `title`, `head`, `base`, `body` をJSONでPOSTして作成すること）
-   - PR本文には「Closes #{issue_num}」「原因の解説」「変更内容の要約」「テスト結果」を日本語で記載する。
+4. Commit & PR (in Japanese):
+   git checkout -B {branch_name}
+   git add -A && git commit -m "fix: resolve #{issue_num}"
+   git push -u origin {branch_name} --force
+   Create a PR to `{default_branch}` via `gh pr create` or GitHub REST API (`POST /repos/{repo_full_name}/pulls`).
+   PR title & body MUST be in concise Japanese:
+   - Closes #{issue_num}
+   - 原因と修正内容（箇条書き3行以内）
 
-5. 最終報告
-   - 作成したPRのURLと修正のポイントを簡潔に報告する。
+5. Final Output Format (STRICT):
+   Output ONLY these 2 lines in Japanese at the very end. No greetings, no logs:
+   PR: <URL of the created PR>
+   要約: <1-sentence summary of the fix within 60 chars>
 """
 
     payload = {
@@ -148,9 +153,9 @@ def run_antigravity_agent(gemini_key: str, repo_full_name: str, default_branch: 
     res = gemini_api("interactions", gemini_key, method="POST", data=payload)
     interaction_id = res.get("id") or res.get("name", "").split("/")[-1]
     if not interaction_id:
-        raise RuntimeError(f"interaction_id の取得に失敗しました: {res}")
+        raise RuntimeError(f"interaction_id 取得失敗: {res}")
 
-    print(f"[{repo_full_name} #{issue_num}] エージェント起動 (タスクID: {interaction_id})")
+    print(f"[{repo_full_name} #{issue_num}] 実行中 (ID: {interaction_id})")
 
     for _ in range(MAX_POLL_COUNT):
         time.sleep(POLL_INTERVAL_SEC)
@@ -159,31 +164,29 @@ def run_antigravity_agent(gemini_key: str, repo_full_name: str, default_branch: 
 
         if status == "completed":
             outputs = status_obj.get("outputs", [])
-            texts = [out.get("text", "") for out in outputs if isinstance(out, dict) and out.get("text")]
-            return "\n".join(texts) if texts else json.dumps(status_obj, ensure_ascii=False)
+            texts = [out.get("text", "").strip() for out in outputs if isinstance(out, dict) and out.get("text")]
+            if not texts:
+                return "PRを作成しました（Pull requestsタブを確認してください）。"
+            final_lines = [line for line in texts[-1].splitlines() if line.strip()]
+            return "\n".join(final_lines[-5:])
 
         elif status in ("failed", "cancelled"):
-            raise RuntimeError(f"エージェント実行失敗 (status: {status}): {json.dumps(status_obj, ensure_ascii=False)}")
+            raise RuntimeError(f"status={status}")
 
-    raise TimeoutError(f"エージェントの処理がタイムアウトしました（{MAX_POLL_COUNT * POLL_INTERVAL_SEC}秒超過）")
+    raise TimeoutError("15分タイムアウト")
 
 
 def main():
     gemini_key = os.environ.get("GEMINI_API_KEY")
     github_token = os.environ.get("CROSS_REPO_TOKEN")
-
     if not gemini_key or not github_token:
-        print("エラー: GEMINI_API_KEY と CROSS_REPO_TOKEN を設定してください。", file=sys.stderr)
-        sys.exit(1)
+        sys.exit("エラー: 環境変数が未設定です。")
 
     owner = get_authenticated_user(github_token)
     issues = find_target_issues(owner, github_token)
-
     if not issues:
-        print(f"対象ラベル '{TARGET_LABEL}' が付いたIssueはありませんでした。")
+        print("対象Issueなし")
         return
-
-    print(f"{len(issues)} 件の対象Issueを検出しました。")
 
     for item in issues:
         repo_api_url = item["repository_url"]
@@ -191,41 +194,28 @@ def main():
         issue_num = item["number"]
 
         if item["user"]["login"] != owner:
-            print(f"[{repo_full_name} #{issue_num}] 作成者がオーナー以外のためスキップします。")
             continue
 
         repo_info = github_api(repo_api_url, github_token)
         default_branch = repo_info.get("default_branch", "main")
+        issue_title = item.get("title", "")
+        issue_body = (item.get("body") or "詳細なし")[:2000]
 
-        print(f"\n--- 処理開始: {repo_full_name} #{issue_num} ({item['title']}) ---")
+        print(f"開始: {repo_full_name} #{issue_num}")
         swap_labels(repo_full_name, issue_num, TARGET_LABEL, RUNNING_LABEL, github_token)
-        post_comment(
-            repo_full_name,
-            issue_num,
-            "🤖 Antigravity Agent が修正作業を開始しました。完了次第PRを作成します。",
-            github_token,
-        )
 
         try:
-            summary = run_antigravity_agent(gemini_key, repo_full_name, default_branch, issue_num, github_token)
-            swap_labels(repo_full_name, issue_num, RUNNING_LABEL, DONE_LABEL, github_token)
-            post_comment(
-                repo_full_name,
-                issue_num,
-                f"✅ 修正作業が完了しました。\n\n{summary}",
-                github_token,
+            summary = run_antigravity_agent(
+                gemini_key, repo_full_name, default_branch, issue_num, issue_title, issue_body, github_token
             )
-            print(f"--- 処理完了: {repo_full_name} #{issue_num} ---")
+            swap_labels(repo_full_name, issue_num, RUNNING_LABEL, DONE_LABEL, github_token)
+            post_comment(repo_full_name, issue_num, f"✅ 自動修正完了\n{summary}", github_token)
+            print(f"完了: {repo_full_name} #{issue_num}")
 
         except Exception as e:
-            print(f"エラー発生 ({repo_full_name} #{issue_num}): {e}", file=sys.stderr)
             swap_labels(repo_full_name, issue_num, RUNNING_LABEL, FAILED_LABEL, github_token)
-            post_comment(
-                repo_full_name,
-                issue_num,
-                f"⚠️ 自動修正中にエラーが発生したため中断しました。\n```\n{e}\n```",
-                github_token,
-            )
+            err_short = str(e)[:300]
+            post_comment(repo_full_name, issue_num, f"⚠️ 自動修正中断: `{err_short}`", github_token)
             sys.exit(1)
 
 

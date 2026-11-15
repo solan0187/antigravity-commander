@@ -6,14 +6,10 @@ import urllib.parse
 import json
 from google import genai
 
-# ---------------------------------------------------------
-# 設定：処理対象のラベル名と1回の巡回での最大処理数
-# ---------------------------------------------------------
-TARGET_LABEL = "auto-fix"          # このラベルが付いたIssueを拾う
-RUNNING_LABEL = "antigravity-wip"  # 作業中に付け替えるラベル（重複防止）
-DONE_LABEL = "antigravity-done"    # PR作成完了後に付けるラベル
-MAX_ISSUES_PER_RUN = 3             # 1回の実行で処理する上限数（クレジット暴走防止）
-# ---------------------------------------------------------
+TARGET_LABEL = "auto-fix"
+RUNNING_LABEL = "antigravity-wip"
+DONE_LABEL = "antigravity-done"
+MAX_ISSUES_PER_RUN = 3
 
 
 def github_api(url: str, token: str, method: str = "GET", data: dict = None):
@@ -39,7 +35,6 @@ def get_authenticated_user(token: str) -> str:
 
 
 def find_target_issues(owner: str, token: str) -> list:
-    # 自分の全リポジトリのOpenなIssueのうち、対象ラベルが付いているものを検索
     query = urllib.parse.quote(f'user:{owner} is:issue is:open label:"{TARGET_LABEL}"')
     url = f"https://api.github.com/search/issues?q={query}&sort=created&order=asc&per_page={MAX_ISSUES_PER_RUN}"
     result = github_api(url, token)
@@ -47,7 +42,6 @@ def find_target_issues(owner: str, token: str) -> list:
 
 
 def swap_labels(repo_full_name: str, issue_num: int, remove_label: str, add_label: str, token: str):
-    # 古いラベルを外す（存在しない場合は無視）
     try:
         encoded_remove = urllib.parse.quote(remove_label)
         github_api(
@@ -58,7 +52,6 @@ def swap_labels(repo_full_name: str, issue_num: int, remove_label: str, add_labe
     except Exception:
         pass
 
-    # 新しいラベルを付与（リポジトリにラベルが未作成でも自動生成される）
     github_api(
         f"https://api.github.com/repos/{repo_full_name}/issues/{issue_num}/labels",
         token,
@@ -91,24 +84,25 @@ def run_antigravity_agent(client, repo_full_name: str, default_branch: str, issu
 
 【実行ステップ】
 1. Git認証とリポジトリのクローン
-   - 以下のコマンドでトークンをURLに出さずに認証設定を行うこと:
+   - まず以下の環境変数を設定する:
+     `export GITHUB_TOKEN="{github_token}"`
+     `export GH_TOKEN="{github_token}"`
+   - トークンをURLに出さずに認証設定を行う:
      `git config --global url."https://x-access-token:${{GITHUB_TOKEN}}@github.com/".insteadOf "https://github.com/"`
    - `git config --global user.name "Antigravity Bot"`
    - `git config --global user.email "antigravity-bot@users.noreply.github.com"`
    - `git clone https://github.com/{repo_full_name}.git` を実行してディレクトリへ移動する。
-   - `gh issue view {issue_num}`（使えない場合はGitHub REST API）でIssueのタイトル・本文・コメントをすべて読み込む。
+   - `gh issue view {issue_num}`（使えない場合はGitHub REST API）でIssueのタイトル・本文・コメントを読み込む。
 
 2. コード調査と修正実装
-   - Issueの要件やバグの再現条件を把握し、関連コードを調査する。
-   - 根本原因を修正するコードを書く（既存の設計思想やスタイルに合わせること）。
-   - セキュリティ上、`.github/workflows/` 配下のファイルは変更しないこと。
+   - Issueの要件やバグを把握し、関連コードを調査して修正する。
+   - `.github/workflows/` 配下のファイルは変更しないこと。
 
 3. ビルド・テストの検証
-   - リポジトリ内のテストやビルドコマンドを探して実行し、既存テストが壊れていないこと・修正が機能することを確認する。
-   - 失敗した場合は原因を特定して修正し、パスするまで繰り返す。
+   - リポジトリ内のテストやビルドコマンドを探して実行し、問題がないことを確認する。
 
 4. コミットとPR作成
-   - `{branch_name}` ブランチを作成（既存なら `-B` でリセット）してチェックアウトし、変更をコミット・pushする。
+   - `{branch_name}` ブランチを作成（既存なら `-B`）してコミット・pushする。
    - `gh pr create`（またはGitHub REST API）で `{default_branch}` 宛てのPRを作成する。
    - PR本文には「Closes #{issue_num}」「原因の解説」「変更内容の要約」「テスト結果」を日本語で記載する。
 
@@ -122,12 +116,6 @@ def run_antigravity_agent(client, repo_full_name: str, default_branch: str, issu
         background=True,
         agent_config={
             "type": "antigravity",
-            "sandbox": {
-                "env": {
-                    "GITHUB_TOKEN": github_token,
-                    "GH_TOKEN": github_token,
-                }
-            },
         },
     )
 
@@ -171,17 +159,14 @@ def main():
     client = genai.Client(api_key=gemini_key, http_options={"api_version": "v1beta"})
 
     for item in issues:
-        # repository_url (例: https://api.github.com/repos/Merunowa/app-rootcalc) からリポジトリ名を抽出
         repo_api_url = item["repository_url"]
         repo_full_name = repo_api_url.replace("https://api.github.com/repos/", "")
         issue_num = item["number"]
 
-        # セキュリティチェック：Issue作成者が自分自身であることを確認
         if item["user"]["login"] != owner:
             print(f"[{repo_full_name} #{issue_num}] 作成者がオーナー以外のためスキップします。")
             continue
 
-        # リポジトリ情報からデフォルトブランチ名（main / master）を取得
         repo_info = github_api(repo_api_url, github_token)
         default_branch = repo_info.get("default_branch", "main")
 

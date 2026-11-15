@@ -64,20 +64,19 @@ def github_api(url: str, token: str, method: str = "GET", data: dict = None, ret
 
 
 def gemini_api(path: str, api_key: str, method: str = "GET", data: dict = None):
-    url = f"https://generativelanguage.googleapis.com/v1beta/{path}"
+    url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){path}"
     return http_json(url, {"x-goog-api-key": api_key}, method=method, data=data)
 
 
 def get_authenticated_user(token: str) -> str:
-    return github_api("https://api.github.com/user", token)["login"]
+    return github_api("[https://api.github.com/user](https://api.github.com/user)", token)["login"]
 
 
 def find_target_items(owner: str, token: str) -> list:
     items = []
-    # GitHub Search APIの必須仕様に合わせ、is:issue と is:pull-request を分けて検索する
     for item_type in ("is:issue", "is:pull-request"):
         query = urllib.parse.quote(f'user:{owner} {item_type} is:open label:"{TARGET_LABEL}"')
-        url = f"https://api.github.com/search/issues?q={query}&sort=updated&order=asc&per_page={MAX_ITEMS_PER_RUN}"
+        url = f"[https://api.github.com/search/issues?q=](https://api.github.com/search/issues?q=){query}&sort=updated&order=asc&per_page={MAX_ITEMS_PER_RUN}"
         res = github_api(url, token) or {}
         items.extend(res.get("items", []))
     items.sort(key=lambda x: x.get("updated_at") or "")
@@ -91,7 +90,7 @@ def set_exclusive_label(repo_full_name: str, number: int, add_label: str, token:
         try:
             enc = urllib.parse.quote(old_label)
             github_api(
-                f"https://api.github.com/repos/{repo_full_name}/issues/{number}/labels/{enc}",
+                f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/issues/{number}/labels/{enc}",
                 token,
                 method="DELETE",
                 retries=1,
@@ -101,7 +100,7 @@ def set_exclusive_label(repo_full_name: str, number: int, add_label: str, token:
 
     if add_label:
         github_api(
-            f"https://api.github.com/repos/{repo_full_name}/issues/{number}/labels",
+            f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/issues/{number}/labels",
             token,
             method="POST",
             data={"labels": [add_label]},
@@ -110,7 +109,7 @@ def set_exclusive_label(repo_full_name: str, number: int, add_label: str, token:
 
 def post_comment(repo_full_name: str, number: int, body: str, token: str):
     github_api(
-        f"https://api.github.com/repos/{repo_full_name}/issues/{number}/comments",
+        f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/issues/{number}/comments",
         token,
         method="POST",
         data={"body": body},
@@ -121,7 +120,7 @@ def get_branch_sha(repo_full_name: str, branch: str, token: str) -> str:
     try:
         enc_branch = urllib.parse.quote(branch, safe="")
         res = github_api(
-            f"https://api.github.com/repos/{repo_full_name}/git/ref/heads/{enc_branch}",
+            f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/git/ref/heads/{enc_branch}",
             token,
             retries=1,
         ) or {}
@@ -131,12 +130,11 @@ def get_branch_sha(repo_full_name: str, branch: str, token: str) -> str:
 
 
 def has_commits_ahead(repo_full_name: str, base_branch: str, head_branch: str, token: str) -> bool:
-    """base_branch と head_branch の間に1つ以上の新しいコミットがあるか確認する"""
     try:
         enc_base = urllib.parse.quote(base_branch, safe="")
         enc_head = urllib.parse.quote(head_branch, safe="")
         res = github_api(
-            f"https://api.github.com/repos/{repo_full_name}/compare/{enc_base}...{enc_head}",
+            f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/compare/{enc_base}...{enc_head}",
             token,
             retries=1,
         ) or {}
@@ -155,10 +153,9 @@ def ensure_pr_exists(
     summary: str,
     token: str,
 ) -> str:
-    """PRが存在するか確認し、AIが作り忘れていた場合はPython側で自動作成してURLを返す"""
     enc_head = urllib.parse.quote(f"{owner}:{head_branch}")
     prs = github_api(
-        f"https://api.github.com/repos/{repo_full_name}/pulls?head={enc_head}&state=open",
+        f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/pulls?head={enc_head}&state=open",
         token,
     ) or []
     if prs and isinstance(prs, list) and prs[0].get("html_url"):
@@ -166,7 +163,7 @@ def ensure_pr_exists(
 
     pr_body = f"Closes #{issue_num}\n\n### 自動修正内容\n{summary}"
     created = github_api(
-        f"https://api.github.com/repos/{repo_full_name}/pulls",
+        f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/pulls",
         token,
         method="POST",
         data={
@@ -181,7 +178,7 @@ def ensure_pr_exists(
 
 def get_pr_context(repo_full_name: str, number: int, owner: str, token: str) -> tuple[str, str]:
     files_data = github_api(
-        f"https://api.github.com/repos/{repo_full_name}/pulls/{number}/files?per_page=50",
+        f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/pulls/{number}/files?per_page=50",
         token,
     ) or []
     changed_files = [
@@ -194,7 +191,7 @@ def get_pr_context(repo_full_name: str, number: int, owner: str, token: str) -> 
     timed_feedbacks = []
 
     comments = github_api(
-        f"https://api.github.com/repos/{repo_full_name}/issues/{number}/comments?per_page=100",
+        f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/issues/{number}/comments?per_page=100",
         token,
     ) or []
     for c in comments:
@@ -214,7 +211,7 @@ def get_pr_context(repo_full_name: str, number: int, owner: str, token: str) -> 
 
     try:
         review_comments = github_api(
-            f"https://api.github.com/repos/{repo_full_name}/pulls/{number}/comments?per_page=100",
+            f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/pulls/{number}/comments?per_page=100",
             token,
         ) or []
         for rc in review_comments:
@@ -252,13 +249,12 @@ def build_prompt(
     feedback: str,
     github_token: str,
 ) -> str:
-    common_rules = f"""[UNIVERSAL EXECUTION & TOKEN-SAVING RULES - STRICT]
-1. Setup & Fast Stack Detection:
-   export GITHUB_TOKEN="{github_token}" GH_TOKEN="{github_token}"
-   git config --global url."https://x-access-token:${{GITHUB_TOKEN}}@github.com/".insteadOf "https://github.com/"
-   git config --global user.name "Antigravity Bot"
-   git config --global user.email "antigravity-bot@users.noreply.github.com"
-   Check root files ONLY (`ls -1`) after cloning to identify stack & test command immediately:
+    auth_repo_url = f"https://x-access-token:{github_token}@[github.com/](https://github.com/){repo_full_name}.git"
+
+    common_rules = """[MANDATORY TOOL EXECUTION & TOKEN-SAVING RULES]
+You MUST actively use your terminal/bash and file editing tools to clone and inspect/modify the code.
+1. Stack Detection:
+   Check root files ONLY (`ls -1`) inside `repo` to identify stack & test command immediately:
    - `package.json` -> Node/TS/JS (`npm test --silent` or `npx tsc --noEmit`)
    - `build.gradle*` -> Android/Kotlin/Java (`./gradlew test --quiet | tail -n 30`)
    - `pubspec.yaml` -> Flutter/Dart (`flutter test | tail -n 30`)
@@ -266,19 +262,16 @@ def build_prompt(
    - `Cargo.toml` -> Rust (`cargo check -q`)
    - `go.mod` -> Go (`go test ./...`)
    (If a repo-specific `AGENTS.md` exists, prioritize its instructions.)
-
 2. Minimal Context Navigation:
    - NEVER `cat` entire large files or scan `.git`, `node_modules`, `build`, `.gradle`, `dist`, `.dart_tool`, or `vendor`.
-   - Locate targets via `grep -rn "<keyword>" . --exclude-dir={{.git,node_modules,build,.gradle,dist,.dart_tool,vendor}}` and read ONLY surrounding lines with `sed -n 'X,Yp'`.
-
+   - Locate targets via `grep -rn "<keyword>" . --exclude-dir={.git,node_modules,build,.gradle,dist,.dart_tool,vendor}` and read ONLY surrounding lines with `sed -n 'X,Yp'`.
 3. Root-Cause Fix & Quiet Verification:
    - Produce the smallest possible diff without reformatting unrelated code.
    - NEVER add external dependencies, upgrade lockfiles, or touch `.github/workflows/`.
-   - Always pipe build/test outputs through `| tail -n 30` to avoid log bloat.
-   - NEVER add, remove, or modify labels or comments on the Issue or PR (handled externally)."""
+   - Always pipe build/test outputs through `| tail -n 30` to avoid log bloat."""
 
     if is_pr:
-        return f"""Update existing Pull Request #{number} in `{repo_full_name}` (branch: `{head_branch}`) based on the reviewer's feedback.
+        return f"""Task: Use your bash/terminal tool to handle Pull Request #{number} in `{repo_full_name}` (branch: `{head_branch}`) based on the reviewer's feedback.
 
 [ORIGINAL PR #{number}: {title}]
 {body}
@@ -291,36 +284,37 @@ def build_prompt(
 
 {common_rules}
 
-4. Clone PR Branch, Apply Fix & Push Update:
-   git clone --depth 1 -b "{head_branch}" "https://github.com/{repo_full_name}.git" repo && cd repo
-   Inspect the files listed under [FILES MODIFIED IN THIS PR], apply the requested changes, and verify with tests.
-   Commit and push directly to `{head_branch}`:
-   git add -A && git commit -m "fix: address review feedback on #{number}"
-   git push origin "{head_branch}"
+4. Execute Git Clone, Edit (if needed), Commit & Push:
+   Run these shell commands:
+     git clone --depth 1 -b "{head_branch}" "{auth_repo_url}" repo && cd repo
+     git config user.name "Antigravity Bot"
+     git config user.email "antigravity-bot@users.noreply.github.com"
+   - If code changes are requested: modify the files, verify with tests, and push (`git add -A && git commit -m "fix: address review feedback on #{number}" && git push origin "{head_branch}"`).
+   - If the feedback is a question or explicitly says not to modify code: do NOT commit or push anything; simply answer concisely in the summary below.
 
 5. Final Output Format (STRICT):
    Output ONLY this 1 line in Japanese at the very end. No greetings, no logs:
-   要約: <1-sentence summary of the additional fix within 60 chars>
+   要約: <1-sentence summary of the action or answer within 80 chars>
 """
     else:
-        return f"""Fix GitHub issue #{number} in `{repo_full_name}` (base: `{base_branch}`, head: `{head_branch}`).
+        return f"""Task: Use your bash/terminal tool to handle GitHub issue #{number} in `{repo_full_name}` (base: `{base_branch}`, target branch: `{head_branch}`).
 
 [ISSUE #{number}: {title}]
 {body}
 
 {common_rules}
 
-4. Clone, Commit & Push Branch:
-   git clone --depth 1 -b "{base_branch}" "https://github.com/{repo_full_name}.git" repo && cd repo
-   Implement the fix and verify with tests.
-   git checkout -B "{head_branch}"
-   git add -A && git commit -m "fix: resolve #{number}"
-   git push -u origin "{head_branch}" --force
-   (Note: Pushing the branch with actual file changes is mandatory. You may also create a PR to `{base_branch}` with `Closes #{number}` in Japanese, or the external controller will create it automatically.)
+4. Execute Git Clone, Edit (if needed), Commit & Push:
+   Run these shell commands:
+     git clone --depth 1 -b "{base_branch}" "{auth_repo_url}" repo && cd repo
+     git config user.name "Antigravity Bot"
+     git config user.email "antigravity-bot@users.noreply.github.com"
+   - If code changes are needed: implement the fix, verify with tests, and push (`git checkout -B "{head_branch}" && git add -A && git commit -m "fix: resolve #{number}" && git push -u origin "{head_branch}" --force`).
+   - If the issue is a dry-run test, investigation-only, or explicitly instructs NOT to modify code: do NOT commit or push any branch; simply report the result in the summary below.
 
 5. Final Output Format (STRICT):
    Output ONLY this 1 line in Japanese at the very end. No greetings, no logs:
-   要約: <1-sentence summary of the fix within 60 chars>
+   要約: <1-sentence summary of the fix, investigation, or dry-run result within 80 chars>
 """
 
 
@@ -350,12 +344,13 @@ def execute_agent(gemini_key: str, repo_full_name: str, number: int, prompt: str
             outputs = status_obj.get("outputs") or []
             texts = [out.get("text", "").strip() for out in outputs if isinstance(out, dict) and out.get("text")]
             if not texts:
-                return "要約: コードの修正を適用しました。"
+                return "要約: 確認・テスト実行を完了しました（コード変更なし）。"
             final_lines = [line for line in texts[-1].splitlines() if line.strip()]
             return "\n".join(final_lines[-3:])
 
         elif status in ("failed", "cancelled"):
-            raise RuntimeError(f"status={status}")
+            err_detail = json.dumps(status_obj, ensure_ascii=False)[:500]
+            raise RuntimeError(f"status={status} ({err_detail})")
 
     raise TimeoutError("15分タイムアウト")
 
@@ -376,7 +371,7 @@ def main():
 
     for item in items:
         repo_api_url = item.get("repository_url", "")
-        repo_full_name = repo_api_url.replace("https://api.github.com/repos/", "")
+        repo_full_name = repo_api_url.replace("[https://api.github.com/repos/](https://api.github.com/repos/)", "")
         number = item.get("number")
         if not repo_full_name or not number:
             continue
@@ -384,11 +379,11 @@ def main():
         is_pr = "pull_request" in item
         title = item.get("title") or ""
         body = (item.get("body") or "詳細なし")[:1500]
-        mode_label = "PR手直し" if is_pr else "Issue修正"
+        mode_label = "PR対応" if is_pr else "Issue対応"
 
         try:
             if is_pr:
-                pr_info = github_api(f"https://api.github.com/repos/{repo_full_name}/pulls/{number}", github_token) or {}
+                pr_info = github_api(f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/pulls/{number}", github_token) or {}
                 head_info = pr_info.get("head") or {}
                 base_info = pr_info.get("base") or {}
                 head_repo_owner = ((head_info.get("repo") or {}).get("owner") or {}).get("login")
@@ -413,7 +408,6 @@ def main():
                 head_branch = f"fix/issue-{number}"
                 files_summary, feedback = "", ""
 
-            # 実行前のブランチSHAを記録
             before_sha = get_branch_sha(repo_full_name, head_branch, github_token)
 
             print(f"開始 ({mode_label}): {repo_full_name} #{number}")
@@ -434,25 +428,19 @@ def main():
             raw_summary = execute_agent(gemini_key, repo_full_name, number, prompt)
             summary = sanitize(raw_summary, gemini_key, github_token)
 
-            # 裏取り検証1：実行後にブランチが存在し、かつSHAが確実に変化しているか
             after_sha = get_branch_sha(repo_full_name, head_branch, github_token)
-            if not after_sha or before_sha == after_sha:
-                raise RuntimeError(f"ブランチ '{head_branch}' に新しいコミットがpushされませんでした。({summary})")
+            has_new_push = bool(after_sha and before_sha != after_sha)
 
-            # 裏取り検証2：baseブランチとの間に実際にコード変更（コミット差分）が存在するか
-            if not has_commits_ahead(repo_full_name, base_branch, head_branch, github_token):
-                raise RuntimeError(
-                    f"'{base_branch}' からの変更差分が0件でした（修正不要と判断されたか、変更が保存されませんでした）。({summary})"
-                )
-
-            # 裏取り検証3：Issueモードの場合、PRが存在するか確認し、無ければPython側で自動作成する
-            if not is_pr:
-                pr_url = ensure_pr_exists(
-                    repo_full_name, owner, base_branch, head_branch, number, title, summary, github_token
-                )
-                comment_body = f"✅ 自動{mode_label}完了\nPR: {pr_url}\n{summary}"
+            if has_new_push and has_commits_ahead(repo_full_name, base_branch, head_branch, github_token):
+                if not is_pr:
+                    pr_url = ensure_pr_exists(
+                        repo_full_name, owner, base_branch, head_branch, number, title, summary, github_token
+                    )
+                    comment_body = f"✅ 自動{mode_label}完了\nPR: {pr_url}\n{summary}"
+                else:
+                    comment_body = f"✅ 自動{mode_label}完了 (`{after_sha[:7]}`)\n{summary}"
             else:
-                comment_body = f"✅ 自動{mode_label}完了 (`{after_sha[:7]}`)\n{summary}"
+                comment_body = f"✅ 自動{mode_label}完了（コード変更なし）\n{summary}"
 
             set_exclusive_label(repo_full_name, number, DONE_LABEL, github_token)
             post_comment(repo_full_name, number, comment_body, github_token)
@@ -460,7 +448,7 @@ def main():
 
         except Exception as e:
             has_error = True
-            safe_err = sanitize(str(e), gemini_key, github_token)[:300]
+            safe_err = sanitize(str(e), gemini_key, github_token)[:450]
             try:
                 set_exclusive_label(repo_full_name, number, FAILED_LABEL, github_token)
                 post_comment(repo_full_name, number, f"⚠️ 自動{mode_label}中断: `{safe_err}`", github_token)

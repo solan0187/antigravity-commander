@@ -16,7 +16,6 @@ MAX_POLL_COUNT = 90  # 最大15分待機
 
 
 def sanitize(text: str, *secrets: str) -> str:
-    """ログやIssueコメントにトークンが絶対に出力されないようマスクする"""
     res = str(text)
     for s in secrets:
         if s and len(s) > 4:
@@ -41,14 +40,12 @@ def http_json(url: str, headers: dict, method: str = "GET", data: dict = None, r
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace")
             if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
-                wait = 3 * (attempt + 1)
-                time.sleep(wait)
+                time.sleep(3 * (attempt + 1))
                 continue
             raise RuntimeError(f"HTTP {e.code} ({url}): {err_body}") from e
         except urllib.error.URLError as e:
             if attempt < retries - 1:
-                wait = 3 * (attempt + 1)
-                time.sleep(wait)
+                time.sleep(3 * (attempt + 1))
                 continue
             raise RuntimeError(f"URL Error ({url}): {e.reason}") from e
 
@@ -64,19 +61,19 @@ def github_api(url: str, token: str, method: str = "GET", data: dict = None, ret
 
 
 def gemini_api(path: str, api_key: str, method: str = "GET", data: dict = None):
-    url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){path}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/{path}"
     return http_json(url, {"x-goog-api-key": api_key}, method=method, data=data)
 
 
 def get_authenticated_user(token: str) -> str:
-    return github_api("[https://api.github.com/user](https://api.github.com/user)", token)["login"]
+    return github_api("https://api.github.com/user", token)["login"]
 
 
 def find_target_items(owner: str, token: str) -> list:
     items = []
     for item_type in ("is:issue", "is:pull-request"):
         query = urllib.parse.quote(f'user:{owner} {item_type} is:open label:"{TARGET_LABEL}"')
-        url = f"[https://api.github.com/search/issues?q=](https://api.github.com/search/issues?q=){query}&sort=updated&order=asc&per_page={MAX_ITEMS_PER_RUN}"
+        url = f"https://api.github.com/search/issues?q={query}&sort=updated&order=asc&per_page={MAX_ITEMS_PER_RUN}"
         res = github_api(url, token) or {}
         items.extend(res.get("items", []))
     items.sort(key=lambda x: x.get("updated_at") or "")
@@ -90,7 +87,7 @@ def set_exclusive_label(repo_full_name: str, number: int, add_label: str, token:
         try:
             enc = urllib.parse.quote(old_label)
             github_api(
-                f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/issues/{number}/labels/{enc}",
+                f"https://api.github.com/repos/{repo_full_name}/issues/{number}/labels/{enc}",
                 token,
                 method="DELETE",
                 retries=1,
@@ -100,7 +97,7 @@ def set_exclusive_label(repo_full_name: str, number: int, add_label: str, token:
 
     if add_label:
         github_api(
-            f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/issues/{number}/labels",
+            f"https://api.github.com/repos/{repo_full_name}/issues/{number}/labels",
             token,
             method="POST",
             data={"labels": [add_label]},
@@ -109,7 +106,7 @@ def set_exclusive_label(repo_full_name: str, number: int, add_label: str, token:
 
 def post_comment(repo_full_name: str, number: int, body: str, token: str):
     github_api(
-        f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/issues/{number}/comments",
+        f"https://api.github.com/repos/{repo_full_name}/issues/{number}/comments",
         token,
         method="POST",
         data={"body": body},
@@ -120,7 +117,7 @@ def get_branch_sha(repo_full_name: str, branch: str, token: str) -> str:
     try:
         enc_branch = urllib.parse.quote(branch, safe="")
         res = github_api(
-            f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/git/ref/heads/{enc_branch}",
+            f"https://api.github.com/repos/{repo_full_name}/git/ref/heads/{enc_branch}",
             token,
             retries=1,
         ) or {}
@@ -134,7 +131,7 @@ def has_commits_ahead(repo_full_name: str, base_branch: str, head_branch: str, t
         enc_base = urllib.parse.quote(base_branch, safe="")
         enc_head = urllib.parse.quote(head_branch, safe="")
         res = github_api(
-            f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/compare/{enc_base}...{enc_head}",
+            f"https://api.github.com/repos/{repo_full_name}/compare/{enc_base}...{enc_head}",
             token,
             retries=1,
         ) or {}
@@ -155,7 +152,7 @@ def ensure_pr_exists(
 ) -> str:
     enc_head = urllib.parse.quote(f"{owner}:{head_branch}")
     prs = github_api(
-        f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/pulls?head={enc_head}&state=open",
+        f"https://api.github.com/repos/{repo_full_name}/pulls?head={enc_head}&state=open",
         token,
     ) or []
     if prs and isinstance(prs, list) and prs[0].get("html_url"):
@@ -163,7 +160,7 @@ def ensure_pr_exists(
 
     pr_body = f"Closes #{issue_num}\n\n### 自動修正内容\n{summary}"
     created = github_api(
-        f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/pulls",
+        f"https://api.github.com/repos/{repo_full_name}/pulls",
         token,
         method="POST",
         data={
@@ -178,7 +175,7 @@ def ensure_pr_exists(
 
 def get_pr_context(repo_full_name: str, number: int, owner: str, token: str) -> tuple[str, str]:
     files_data = github_api(
-        f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/pulls/{number}/files?per_page=50",
+        f"https://api.github.com/repos/{repo_full_name}/pulls/{number}/files?per_page=50",
         token,
     ) or []
     changed_files = [
@@ -189,9 +186,8 @@ def get_pr_context(repo_full_name: str, number: int, owner: str, token: str) -> 
     files_summary = "\n".join(changed_files) if changed_files else "（変更ファイル情報なし）"
 
     timed_feedbacks = []
-
     comments = github_api(
-        f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/issues/{number}/comments?per_page=100",
+        f"https://api.github.com/repos/{repo_full_name}/issues/{number}/comments?per_page=100",
         token,
     ) or []
     for c in comments:
@@ -211,7 +207,7 @@ def get_pr_context(repo_full_name: str, number: int, owner: str, token: str) -> 
 
     try:
         review_comments = github_api(
-            f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/pulls/{number}/comments?per_page=100",
+            f"https://api.github.com/repos/{repo_full_name}/pulls/{number}/comments?per_page=100",
             token,
         ) or []
         for rc in review_comments:
@@ -228,13 +224,11 @@ def get_pr_context(repo_full_name: str, number: int, owner: str, token: str) -> 
         pass
 
     if not timed_feedbacks:
-        return files_summary, "（追加コメントなし。PR本文と変更ファイルを確認して修正してください）"
+        return files_summary, "（追加コメントなし）"
 
     timed_feedbacks.sort(key=lambda x: x[0])
     latest_texts = [item[1] for item in timed_feedbacks[-3:]]
-    feedback_text = "\n---\n".join(latest_texts)[:1500]
-
-    return files_summary, feedback_text
+    return files_summary, "\n---\n".join(latest_texts)[:1500]
 
 
 def build_prompt(
@@ -249,7 +243,7 @@ def build_prompt(
     feedback: str,
     github_token: str,
 ) -> str:
-    auth_repo_url = f"https://x-access-token:{github_token}@[github.com/](https://github.com/){repo_full_name}.git"
+    auth_repo_url = f"https://x-access-token:{github_token}@github.com/{repo_full_name}.git"
 
     common_rules = """[MANDATORY TOOL EXECUTION & TOKEN-SAVING RULES]
 You MUST actively use your terminal/bash and file editing tools to clone and inspect/modify the code.
@@ -342,6 +336,7 @@ def execute_agent(gemini_key: str, repo_full_name: str, number: int, prompt: str
 
         if status == "completed":
             outputs = status_obj.get("outputs") or []
+            print(f"[{repo_full_name} #{number}] 生レスポンス構造: {json.dumps(outputs, ensure_ascii=False)[:600]}")
             texts = [out.get("text", "").strip() for out in outputs if isinstance(out, dict) and out.get("text")]
             if not texts:
                 return "要約: 確認・テスト実行を完了しました（コード変更なし）。"
@@ -371,7 +366,7 @@ def main():
 
     for item in items:
         repo_api_url = item.get("repository_url", "")
-        repo_full_name = repo_api_url.replace("[https://api.github.com/repos/](https://api.github.com/repos/)", "")
+        repo_full_name = repo_api_url.replace("https://api.github.com/repos/", "")
         number = item.get("number")
         if not repo_full_name or not number:
             continue
@@ -383,7 +378,7 @@ def main():
 
         try:
             if is_pr:
-                pr_info = github_api(f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_full_name}/pulls/{number}", github_token) or {}
+                pr_info = github_api(f"https://api.github.com/repos/{repo_full_name}/pulls/{number}", github_token) or {}
                 head_info = pr_info.get("head") or {}
                 base_info = pr_info.get("base") or {}
                 head_repo_owner = ((head_info.get("repo") or {}).get("owner") or {}).get("login")

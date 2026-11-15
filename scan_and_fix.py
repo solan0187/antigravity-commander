@@ -116,6 +116,9 @@ def run_antigravity_agent(client, repo_full_name: str, default_branch: str, issu
         background=True,
         agent_config={
             "type": "antigravity",
+            "environment": {
+                "type": "sandbox",
+            },
         },
     )
 

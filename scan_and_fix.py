@@ -80,7 +80,6 @@ def find_target_items(owner: str, token: str) -> list:
         url = f"https://api.github.com/search/issues?q={query}&sort=updated&order=asc&per_page={MAX_ITEMS_PER_RUN}"
         res = github_api(url, token) or {}
         items.extend(res.get("items", []))
-    # 更新日時が古い順に並べ替えて上限件数まで返す
     items.sort(key=lambda x: x.get("updated_at") or "")
     return items[:MAX_ITEMS_PER_RUN]
 
@@ -131,6 +130,21 @@ def get_branch_sha(repo_full_name: str, branch: str, token: str) -> str:
         return ""
 
 
+def has_commits_ahead(repo_full_name: str, base_branch: str, head_branch: str, token: str) -> bool:
+    """base_branch と head_branch の間に1つ以上の新しいコミットがあるか確認する"""
+    try:
+        enc_base = urllib.parse.quote(base_branch, safe="")
+        enc_head = urllib.parse.quote(head_branch, safe="")
+        res = github_api(
+            f"https://api.github.com/repos/{repo_full_name}/compare/{enc_base}...{enc_head}",
+            token,
+            retries=1,
+        ) or {}
+        return (res.get("ahead_by") or 0) > 0
+    except Exception:
+        return False
+
+
 def ensure_pr_exists(
     repo_full_name: str,
     owner: str,
@@ -150,7 +164,6 @@ def ensure_pr_exists(
     if prs and isinstance(prs, list) and prs[0].get("html_url"):
         return prs[0]["html_url"]
 
-    # AIがブランチだけpushしてPR作成を忘れた場合のフォールバック作成
     pr_body = f"Closes #{issue_num}\n\n### 自動修正内容\n{summary}"
     created = github_api(
         f"https://api.github.com/repos/{repo_full_name}/pulls",
@@ -303,7 +316,7 @@ def build_prompt(
    git checkout -B "{head_branch}"
    git add -A && git commit -m "fix: resolve #{number}"
    git push -u origin "{head_branch}" --force
-   (Note: Pushing the branch is mandatory. You may also create a PR to `{base_branch}` with `Closes #{number}` in Japanese, or the external controller will create it automatically.)
+   (Note: Pushing the branch with actual file changes is mandatory. You may also create a PR to `{base_branch}` with `Closes #{number}` in Japanese, or the external controller will create it automatically.)
 
 5. Final Output Format (STRICT):
    Output ONLY this 1 line in Japanese at the very end. No greetings, no logs:
@@ -400,7 +413,7 @@ def main():
                 head_branch = f"fix/issue-{number}"
                 files_summary, feedback = "", ""
 
-            # 実行前のブランチSHAを記録（Issueモード・PRモード共通）
+            # 実行前のブランチSHAを記録
             before_sha = get_branch_sha(repo_full_name, head_branch, github_token)
 
             print(f"開始 ({mode_label}): {repo_full_name} #{number}")
@@ -426,7 +439,13 @@ def main():
             if not after_sha or before_sha == after_sha:
                 raise RuntimeError(f"ブランチ '{head_branch}' に新しいコミットがpushされませんでした。({summary})")
 
-            # 裏取り検証2：Issueモードの場合、PRが確実に存在するか確認し、無ければPython側で自動作成する
+            # 裏取り検証2：baseブランチとの間に実際にコード変更（コミット差分）が存在するか
+            if not has_commits_ahead(repo_full_name, base_branch, head_branch, github_token):
+                raise RuntimeError(
+                    f"'{base_branch}' からの変更差分が0件でした（修正不要と判断されたか、変更が保存されませんでした）。({summary})"
+                )
+
+            # 裏取り検証3：Issueモードの場合、PRが存在するか確認し、無ければPython側で自動作成する
             if not is_pr:
                 pr_url = ensure_pr_exists(
                     repo_full_name, owner, base_branch, head_branch, number, title, summary, github_token

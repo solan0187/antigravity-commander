@@ -73,10 +73,16 @@ def get_authenticated_user(token: str) -> str:
 
 
 def find_target_items(owner: str, token: str) -> list:
-    query = urllib.parse.quote(f'user:{owner} is:open label:"{TARGET_LABEL}"')
-    url = f"https://api.github.com/search/issues?q={query}&sort=updated&order=asc&per_page={MAX_ITEMS_PER_RUN}"
-    res = github_api(url, token) or {}
-    return res.get("items", [])
+    items = []
+    # GitHub Search APIの必須仕様に合わせ、is:issue と is:pull-request を分けて検索する
+    for item_type in ("is:issue", "is:pull-request"):
+        query = urllib.parse.quote(f'user:{owner} {item_type} is:open label:"{TARGET_LABEL}"')
+        url = f"https://api.github.com/search/issues?q={query}&sort=updated&order=asc&per_page={MAX_ITEMS_PER_RUN}"
+        res = github_api(url, token) or {}
+        items.extend(res.get("items", []))
+    # 更新日時が古い順に並べ替えて上限件数まで返す
+    items.sort(key=lambda x: x.get("updated_at") or "")
+    return items[:MAX_ITEMS_PER_RUN]
 
 
 def set_exclusive_label(repo_full_name: str, number: int, add_label: str, token: str):

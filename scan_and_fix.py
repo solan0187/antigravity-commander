@@ -141,7 +141,7 @@ def run_antigravity_agent(gemini_key: str, repo_full_name: str, default_branch: 
         "input": prompt,
         "background": True,
         "environment": {
-            "type": "sandbox",
+            "type": "remote",
         },
     }
 

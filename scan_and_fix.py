@@ -168,7 +168,7 @@ def main():
         return
 
     print(f"{len(issues)} 件の対象Issueを検出しました。")
-    client = genai.Client(api_key=gemini_key, http_options={"api_version": "v1alpha"})
+    client = genai.Client(api_key=gemini_key, http_options={"api_version": "v1beta"})
 
     for item in issues:
         # repository_url (例: https://api.github.com/repos/Merunowa/app-rootcalc) からリポジトリ名を抽出

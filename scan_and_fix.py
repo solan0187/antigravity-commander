@@ -3,13 +3,34 @@ import sys
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
 import json
-from google import genai
 
 TARGET_LABEL = "auto-fix"
 RUNNING_LABEL = "antigravity-wip"
 DONE_LABEL = "antigravity-done"
+FAILED_LABEL = "antigravity-failed"
 MAX_ISSUES_PER_RUN = 3
+POLL_INTERVAL_SEC = 10
+MAX_POLL_COUNT = 90  # 最大15分待機
+
+
+def http_json(url: str, headers: dict, method: str = "GET", data: dict = None):
+    body = json.dumps(data).encode("utf-8") if data is not None else None
+    req_headers = dict(headers)
+    if body is not None:
+        req_headers["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as res:
+            if res.status == 204:
+                return None
+            raw = res.read().decode("utf-8")
+            return json.loads(raw) if raw else None
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {e.code} ({url}): {err_body}") from e
 
 
 def github_api(url: str, token: str, method: str = "GET", data: dict = None):
@@ -17,16 +38,17 @@ def github_api(url: str, token: str, method: str = "GET", data: dict = None):
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "antigravity-commander",
     }
-    body = json.dumps(data).encode("utf-8") if data is not None else None
-    if body:
-        headers["Content-Type"] = "application/json"
+    return http_json(url, headers, method=method, data=data)
 
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    with urllib.request.urlopen(req) as res:
-        if res.status == 204:
-            return None
-        return json.loads(res.read().decode("utf-8"))
+
+def gemini_api(path: str, api_key: str, method: str = "GET", data: dict = None):
+    url = f"https://generativelanguage.googleapis.com/v1beta/{path}"
+    headers = {
+        "x-goog-api-key": api_key,
+    }
+    return http_json(url, headers, method=method, data=data)
 
 
 def get_authenticated_user(token: str) -> str:
@@ -42,22 +64,24 @@ def find_target_issues(owner: str, token: str) -> list:
 
 
 def swap_labels(repo_full_name: str, issue_num: int, remove_label: str, add_label: str, token: str):
-    try:
-        encoded_remove = urllib.parse.quote(remove_label)
-        github_api(
-            f"https://api.github.com/repos/{repo_full_name}/issues/{issue_num}/labels/{encoded_remove}",
-            token,
-            method="DELETE",
-        )
-    except Exception:
-        pass
+    if remove_label:
+        try:
+            encoded_remove = urllib.parse.quote(remove_label)
+            github_api(
+                f"https://api.github.com/repos/{repo_full_name}/issues/{issue_num}/labels/{encoded_remove}",
+                token,
+                method="DELETE",
+            )
+        except Exception:
+            pass
 
-    github_api(
-        f"https://api.github.com/repos/{repo_full_name}/issues/{issue_num}/labels",
-        token,
-        method="POST",
-        data={"labels": [add_label]},
-    )
+    if add_label:
+        github_api(
+            f"https://api.github.com/repos/{repo_full_name}/issues/{issue_num}/labels",
+            token,
+            method="POST",
+            data={"labels": [add_label]},
+        )
 
 
 def post_comment(repo_full_name: str, issue_num: int, body: str, token: str):
@@ -69,12 +93,12 @@ def post_comment(repo_full_name: str, issue_num: int, body: str, token: str):
     )
 
 
-def run_antigravity_agent(client, repo_full_name: str, default_branch: str, issue_num: int, github_token: str):
+def run_antigravity_agent(gemini_key: str, repo_full_name: str, default_branch: str, issue_num: int, github_token: str) -> str:
     branch_name = f"fix/issue-{issue_num}-antigravity"
 
     prompt = f"""
 あなたは熟練のソフトウェアエンジニアです。
-クラウドのサンドボックス環境内で以下の手順を実行し、GitHubのIssueを修正してプルリクエストを作成してください。
+サンドボックス環境内で以下の手順を実行し、GitHubのIssueを修正してプルリクエストを作成してください。
 
 【対象情報】
 - リポジトリ: {repo_full_name}
@@ -84,7 +108,7 @@ def run_antigravity_agent(client, repo_full_name: str, default_branch: str, issu
 
 【実行ステップ】
 1. Git認証とリポジトリのクローン
-   - まず以下の環境変数を設定する:
+   - 以下の環境変数を設定する:
      `export GITHUB_TOKEN="{github_token}"`
      `export GH_TOKEN="{github_token}"`
    - トークンをURLに出さずに認証設定を行う:
@@ -92,55 +116,56 @@ def run_antigravity_agent(client, repo_full_name: str, default_branch: str, issu
    - `git config --global user.name "Antigravity Bot"`
    - `git config --global user.email "antigravity-bot@users.noreply.github.com"`
    - `git clone https://github.com/{repo_full_name}.git` を実行してディレクトリへ移動する。
-   - `gh issue view {issue_num}`（使えない場合はGitHub REST API）でIssueのタイトル・本文・コメントを読み込む。
+   - `gh issue view {issue_num}` を実行してIssueのタイトル・本文・コメントを読み込む。
+     （※ `gh` コマンドが未インストールの場合は、Pythonの `urllib.request` で `https://api.github.com/repos/{repo_full_name}/issues/{issue_num}` と `/comments` に `Authorization: Bearer $GITHUB_TOKEN` ヘッダを付けてGETリクエストし取得すること）
 
 2. コード調査と修正実装
    - Issueの要件やバグを把握し、関連コードを調査して修正する。
-   - `.github/workflows/` 配下のファイルは変更しないこと。
+   - セキュリティ上、`.github/workflows/` 配下のファイルは絶対に変更しないこと。
 
 3. ビルド・テストの検証
    - リポジトリ内のテストやビルドコマンドを探して実行し、問題がないことを確認する。
 
 4. コミットとPR作成
-   - `{branch_name}` ブランチを作成（既存なら `-B`）してコミット・pushする。
-   - `gh pr create`（またはGitHub REST API）で `{default_branch}` 宛てのPRを作成する。
+   - `git checkout -B {branch_name}` で作業ブランチを作成し、変更をコミットして `git push -u origin {branch_name}` でpushする。
+   - `gh pr create --base {default_branch} --head {branch_name} --title "Fix #{issue_num}" --body "..."` でPRを作成する。
+     （※ `gh` コマンドが使えない場合は、Pythonの `urllib.request` で `https://api.github.com/repos/{repo_full_name}/pulls` に `title`, `head`, `base`, `body` をJSONでPOSTして作成すること）
    - PR本文には「Closes #{issue_num}」「原因の解説」「変更内容の要約」「テスト結果」を日本語で記載する。
 
 5. 最終報告
    - 作成したPRのURLと修正のポイントを簡潔に報告する。
 """
 
-    interaction = client.interactions.create(
-        agent="antigravity-preview-09-2026",
-        input=prompt,
-        background=True,
-        agent_config={
-            "type": "antigravity",
-            "environment": {
-                "type": "sandbox",
-            },
+    payload = {
+        "agent": "antigravity-preview-09-2026",
+        "input": prompt,
+        "background": True,
+        "environment": {
+            "type": "sandbox",
         },
-    )
+    }
 
-    interaction_id = interaction.id
+    res = gemini_api("interactions", gemini_key, method="POST", data=payload)
+    interaction_id = res.get("id") or res.get("name", "").split("/")[-1]
+    if not interaction_id:
+        raise RuntimeError(f"interaction_id の取得に失敗しました: {res}")
+
     print(f"[{repo_full_name} #{issue_num}] エージェント起動 (タスクID: {interaction_id})")
 
-    while True:
-        status_obj = client.interactions.get(interaction_id)
-        status = getattr(status_obj, "status", None)
+    for _ in range(MAX_POLL_COUNT):
+        time.sleep(POLL_INTERVAL_SEC)
+        status_obj = gemini_api(f"interactions/{interaction_id}", gemini_key, method="GET")
+        status = status_obj.get("status")
 
         if status == "completed":
-            output_texts = []
-            if hasattr(status_obj, "outputs") and status_obj.outputs:
-                for out in status_obj.outputs:
-                    if hasattr(out, "text") and out.text:
-                        output_texts.append(out.text)
-            return "\n".join(output_texts)
+            outputs = status_obj.get("outputs", [])
+            texts = [out.get("text", "") for out in outputs if isinstance(out, dict) and out.get("text")]
+            return "\n".join(texts) if texts else json.dumps(status_obj, ensure_ascii=False)
 
         elif status in ("failed", "cancelled"):
-            raise RuntimeError(f"エージェント実行失敗 (status: {status}): {status_obj}")
+            raise RuntimeError(f"エージェント実行失敗 (status: {status}): {json.dumps(status_obj, ensure_ascii=False)}")
 
-        time.sleep(10)
+    raise TimeoutError(f"エージェントの処理がタイムアウトしました（{MAX_POLL_COUNT * POLL_INTERVAL_SEC}秒超過）")
 
 
 def main():
@@ -159,7 +184,6 @@ def main():
         return
 
     print(f"{len(issues)} 件の対象Issueを検出しました。")
-    client = genai.Client(api_key=gemini_key, http_options={"api_version": "v1beta"})
 
     for item in issues:
         repo_api_url = item["repository_url"]
@@ -183,7 +207,7 @@ def main():
         )
 
         try:
-            summary = run_antigravity_agent(client, repo_full_name, default_branch, issue_num, github_token)
+            summary = run_antigravity_agent(gemini_key, repo_full_name, default_branch, issue_num, github_token)
             swap_labels(repo_full_name, issue_num, RUNNING_LABEL, DONE_LABEL, github_token)
             post_comment(
                 repo_full_name,
@@ -195,12 +219,14 @@ def main():
 
         except Exception as e:
             print(f"エラー発生 ({repo_full_name} #{issue_num}): {e}", file=sys.stderr)
+            swap_labels(repo_full_name, issue_num, RUNNING_LABEL, FAILED_LABEL, github_token)
             post_comment(
                 repo_full_name,
                 issue_num,
                 f"⚠️ 自動修正中にエラーが発生したため中断しました。\n```\n{e}\n```",
                 github_token,
             )
+            sys.exit(1)
 
 
 if __name__ == "__main__":

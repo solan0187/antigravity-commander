@@ -1,18 +1,25 @@
 import os
+import re
 import sys
 import time
 import urllib.request
 import urllib.parse
 import urllib.error
 import json
+from datetime import datetime, timezone, timedelta
 
 TARGET_LABEL = "auto-fix"
 RUNNING_LABEL = "antigravity-wip"
 DONE_LABEL = "antigravity-done"
 FAILED_LABEL = "antigravity-failed"
-MAX_ITEMS_PER_RUN = 3
-POLL_INTERVAL_SEC = 10
-MAX_POLL_COUNT = 90  # 最大15分待機
+MAX_ITEMS_PER_RUN = 5
+
+# --- 自律お掃除（Auto-Improve）モード設定 ---
+ENABLE_AUTO_IMPROVE = True
+MAX_AUTO_IMPROVE_PER_DAY = 2       # 1日あたりに自動作成するDraft PRの最大数（クレジット消化ペースに合わせて調整可）
+AUTO_IMPROVE_ACTIVE_ONLY = True    # Trueなら日本時間の深夜〜早朝（0:00〜7:00）や日中の空き時間に稼働。時間帯を絞りたい場合は下の関数で制御
+SELF_REPO_NAME = "antigravity-commander"
+JST = timezone(timedelta(hours=9))
 
 
 def sanitize(text: str, *secrets: str) -> str:
@@ -69,10 +76,10 @@ def get_authenticated_user(token: str) -> str:
     return github_api("https://api.github.com/user", token)["login"]
 
 
-def find_target_items(owner: str, token: str) -> list:
+def find_items_by_label(owner: str, label: str, token: str) -> list:
     items = []
     for item_type in ("is:issue", "is:pull-request"):
-        query = urllib.parse.quote(f'user:{owner} {item_type} is:open label:"{TARGET_LABEL}"')
+        query = urllib.parse.quote(f'user:{owner} {item_type} is:open label:"{label}"')
         url = f"https://api.github.com/search/issues?q={query}&sort=updated&order=asc&per_page={MAX_ITEMS_PER_RUN}"
         res = github_api(url, token) or {}
         items.extend(res.get("items", []))
@@ -149,6 +156,7 @@ def ensure_pr_exists(
     issue_title: str,
     summary: str,
     token: str,
+    draft: bool = False,
 ) -> str:
     enc_head = urllib.parse.quote(f"{owner}:{head_branch}")
     prs = github_api(
@@ -158,16 +166,23 @@ def ensure_pr_exists(
     if prs and isinstance(prs, list) and prs[0].get("html_url"):
         return prs[0]["html_url"]
 
-    pr_body = f"Closes #{issue_num}\n\n### 自動修正内容\n{summary}"
+    if issue_num > 0:
+        pr_title = f"fix: {issue_title} (#{issue_num})"
+        pr_body = f"Closes #{issue_num}\n\n### 自動修正内容\n{summary}"
+    else:
+        pr_title = f"chore: {issue_title}"
+        pr_body = f"### 🤖 自律改善パトロールによる提案 (Draft)\n{summary}\n\n---\n※ 内容をレビューし、問題なければ「Ready for review」にしてマージしてください。"
+
     created = github_api(
         f"https://api.github.com/repos/{repo_full_name}/pulls",
         token,
         method="POST",
         data={
-            "title": f"fix: {issue_title} (#{issue_num})",
+            "title": pr_title,
             "head": head_branch,
             "base": base_branch,
             "body": pr_body,
+            "draft": draft,
         },
     ) or {}
     return created.get("html_url") or ""
@@ -198,9 +213,7 @@ def get_pr_context(repo_full_name: str, number: int, owner: str, token: str) -> 
         if (
             user_login == owner
             and body
-            and not body.startswith("✅ 自動")
-            and not body.startswith("⚠️ 自動")
-            and not body.startswith("🤖 ")
+            and not body.startswith(("✅ 自動", "⚠️ 自動", "⏳ 自動"))
         ):
             ts = c.get("updated_at") or c.get("created_at") or ""
             timed_feedbacks.append((ts, body))
@@ -231,21 +244,8 @@ def get_pr_context(repo_full_name: str, number: int, owner: str, token: str) -> 
     return files_summary, "\n---\n".join(latest_texts)[:1500]
 
 
-def build_prompt(
-    is_pr: bool,
-    repo_full_name: str,
-    base_branch: str,
-    head_branch: str,
-    number: int,
-    title: str,
-    body: str,
-    files_summary: str,
-    feedback: str,
-    github_token: str,
-) -> str:
-    auth_repo_url = f"https://x-access-token:{github_token}@github.com/{repo_full_name}.git"
-
-    common_rules = """[MANDATORY TOOL EXECUTION & TOKEN-SAVING RULES]
+def get_common_rules() -> str:
+    return """[MANDATORY TOOL EXECUTION & TOKEN-SAVING RULES]
 You MUST actively use your terminal/bash and file editing tools to clone and inspect/modify the code.
 1. Stack Detection:
    Check root files ONLY (`ls -1`) inside `repo` to identify stack & test command immediately:
@@ -260,9 +260,25 @@ You MUST actively use your terminal/bash and file editing tools to clone and ins
    - NEVER `cat` entire large files or scan `.git`, `node_modules`, `build`, `.gradle`, `dist`, `.dart_tool`, or `vendor`.
    - Locate targets via `grep -rn "<keyword>" . --exclude-dir={.git,node_modules,build,.gradle,dist,.dart_tool,vendor}` and read ONLY surrounding lines with `sed -n 'X,Yp'`.
 3. Root-Cause Fix & Quiet Verification:
-   - Produce the smallest possible diff without reformatting unrelated code.
+   - Produce the smallest possible, high-value diff without reformatting unrelated code.
    - NEVER add external dependencies, upgrade lockfiles, or touch `.github/workflows/`.
    - Always pipe build/test outputs through `| tail -n 30` to avoid log bloat."""
+
+
+def build_prompt(
+    is_pr: bool,
+    repo_full_name: str,
+    base_branch: str,
+    head_branch: str,
+    number: int,
+    title: str,
+    body: str,
+    files_summary: str,
+    feedback: str,
+    github_token: str,
+) -> str:
+    auth_repo_url = f"https://x-access-token:{github_token}@github.com/{repo_full_name}.git"
+    common_rules = get_common_rules()
 
     if is_pr:
         return f"""Task: Use your bash/terminal tool to handle Pull Request #{number} in `{repo_full_name}` (branch: `{head_branch}`) based on the reviewer's feedback.
@@ -312,7 +328,46 @@ You MUST actively use your terminal/bash and file editing tools to clone and ins
 """
 
 
-def execute_agent(gemini_key: str, repo_full_name: str, number: int, prompt: str) -> str:
+def build_auto_improve_prompt(
+    repo_full_name: str,
+    base_branch: str,
+    head_branch: str,
+    github_token: str,
+) -> str:
+    auth_repo_url = f"https://x-access-token:{github_token}@github.com/{repo_full_name}.git"
+    common_rules = get_common_rules()
+
+    return f"""Task: Autonomous Code Quality & Reliability Patrol for `{repo_full_name}` (base: `{base_branch}`, target branch: `{head_branch}`).
+There are currently no pending user issues. Your mission is to inspect the codebase, find ONE high-impact improvement, implement it safely, and verify it passes all tests.
+
+{common_rules}
+
+4. Inspection Priorities (Pick the single highest-value improvement):
+   - Priority A: Missing unit tests or edge-case tests for core business logic / calculations / parsers.
+   - Priority B: Subtle bug, unhandled null/empty state, race condition, or division-by-zero risk in existing logic.
+   - Priority C: Type safety improvement (removing `any`, tightening types) or dead code / duplicated logic cleanup.
+   - Do NOT make trivial cosmetic-only changes (like adding comments or renaming variables alone).
+
+5. Execute Git Clone, Improve, Test & Push:
+   Run these shell commands:
+     git clone --depth 1 -b "{base_branch}" "{auth_repo_url}" repo && cd repo
+     git config user.name "Antigravity Bot"
+     git config user.email "antigravity-bot@users.noreply.github.com"
+   - Inspect key source files and existing tests, implement the single best improvement, and run the project's test/typecheck suite to confirm zero regressions.
+   - If you made a solid, verified improvement:
+     git checkout -B "{head_branch}"
+     git add -A && git commit -m "chore: autonomous code quality and test improvement"
+     git push -u origin "{head_branch}" --force
+   - If the repository is empty, has no testable source files, or tests fail and cannot be cleanly resolved: do NOT push anything.
+
+6. Final Output Format (STRICT):
+   Output ONLY these 2 lines in Japanese at the very end. No greetings, no logs:
+   タイトル: <Concise Japanese PR title within 45 chars>
+   要約: <2-3 bullet points in Japanese explaining what was improved and why>
+"""
+
+
+def start_agent_async(gemini_key: str, prompt: str) -> str:
     payload = {
         "agent": "antigravity-preview-09-2026",
         "input": prompt,
@@ -321,48 +376,105 @@ def execute_agent(gemini_key: str, repo_full_name: str, number: int, prompt: str
             "type": "remote",
         },
     }
-
     res = gemini_api("interactions", gemini_key, method="POST", data=payload) or {}
     interaction_id = res.get("id") or res.get("name", "").split("/")[-1]
     if not interaction_id:
         raise RuntimeError(f"interaction_id 取得失敗: {res}")
-
-    print(f"[{repo_full_name} #{number}] エージェント実行中 (ID: {interaction_id})")
-
-    for _ in range(MAX_POLL_COUNT):
-        time.sleep(POLL_INTERVAL_SEC)
-        status_obj = gemini_api(f"interactions/{interaction_id}", gemini_key, method="GET") or {}
-        status = status_obj.get("status")
-
-        if status == "completed":
-            outputs = status_obj.get("outputs") or []
-            print(f"[{repo_full_name} #{number}] 生レスポンス構造: {json.dumps(outputs, ensure_ascii=False)[:600]}")
-            texts = [out.get("text", "").strip() for out in outputs if isinstance(out, dict) and out.get("text")]
-            if not texts:
-                return "要約: 確認・テスト実行を完了しました（コード変更なし）。"
-            final_lines = [line for line in texts[-1].splitlines() if line.strip()]
-            return "\n".join(final_lines[-3:])
-
-        elif status in ("failed", "cancelled"):
-            err_detail = json.dumps(status_obj, ensure_ascii=False)[:500]
-            raise RuntimeError(f"status={status} ({err_detail})")
-
-    raise TimeoutError("15分タイムアウト")
+    return interaction_id
 
 
-def main():
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    github_token = os.environ.get("CROSS_REPO_TOKEN")
-    if not gemini_key or not github_token:
-        sys.exit("エラー: 環境変数が未設定です。")
-
-    owner = get_authenticated_user(github_token)
-    items = find_target_items(owner, github_token)
-    if not items:
-        print("対象アイテムなし")
-        return
-
+def check_wip_items(owner: str, gemini_key: str, github_token: str) -> tuple[bool, int]:
+    """実行中(antigravity-wip)のアイテムを回収する。(エラー有無, 処理中または回収した件数)を返す"""
     has_error = False
+    wip_items = find_items_by_label(owner, RUNNING_LABEL, github_token)
+
+    for item in wip_items:
+        repo_api_url = item.get("repository_url", "")
+        repo_full_name = repo_api_url.replace("https://api.github.com/repos/", "")
+        number = item.get("number")
+        if not repo_full_name or not number:
+            continue
+
+        is_pr = "pull_request" in item
+        title = item.get("title") or ""
+        mode_label = "PR対応" if is_pr else "Issue対応"
+
+        try:
+            comments = github_api(
+                f"https://api.github.com/repos/{repo_full_name}/issues/{number}/comments?per_page=20",
+                github_token,
+            ) or []
+            meta_match = None
+            for c in reversed(comments):
+                m = re.search(r"<!-- antigravity:id=([^;]+);sha=([^;]*) -->", c.get("body") or "")
+                if m:
+                    meta_match = m
+                    break
+
+            if not meta_match:
+                raise RuntimeError("追跡用タスクIDがコメントから見つかりませんでした。")
+
+            interaction_id, before_sha = meta_match.group(1), meta_match.group(2)
+            status_obj = gemini_api(f"interactions/{interaction_id}", gemini_key, method="GET") or {}
+            status = status_obj.get("status")
+
+            if status not in ("completed", "failed", "cancelled"):
+                print(f"継続中 ({mode_label}): {repo_full_name} #{number} (status={status})")
+                continue
+
+            if status in ("failed", "cancelled"):
+                err_detail = json.dumps(status_obj, ensure_ascii=False)[:400]
+                raise RuntimeError(f"status={status} ({err_detail})")
+
+            outputs = status_obj.get("outputs") or []
+            texts = [out.get("text", "").strip() for out in outputs if isinstance(out, dict) and out.get("text")]
+            raw_summary = "\n".join(texts[-1].splitlines()[-3:]) if texts else "要約: 確認・テスト実行を完了しました（コード変更なし）。"
+            summary = sanitize(raw_summary, gemini_key, github_token)
+
+            if is_pr:
+                pr_info = github_api(f"https://api.github.com/repos/{repo_full_name}/pulls/{number}", github_token) or {}
+                base_branch = (pr_info.get("base") or {}).get("ref") or "main"
+                head_branch = (pr_info.get("head") or {}).get("ref") or ""
+            else:
+                repo_info = github_api(repo_api_url, github_token) or {}
+                base_branch = repo_info.get("default_branch") or "main"
+                head_branch = f"fix/issue-{number}"
+
+            after_sha = get_branch_sha(repo_full_name, head_branch, github_token)
+            has_new_push = bool(after_sha and before_sha != after_sha)
+
+            if has_new_push and has_commits_ahead(repo_full_name, base_branch, head_branch, github_token):
+                if not is_pr:
+                    pr_url = ensure_pr_exists(
+                        repo_full_name, owner, base_branch, head_branch, number, title, summary, github_token
+                    )
+                    comment_body = f"✅ 自動{mode_label}完了\nPR: {pr_url}\n{summary}"
+                else:
+                    comment_body = f"✅ 自動{mode_label}完了 (`{after_sha[:7]}`)\n{summary}"
+            else:
+                comment_body = f"✅ 自動{mode_label}完了（コード変更なし）\n{summary}"
+
+            set_exclusive_label(repo_full_name, number, DONE_LABEL, github_token)
+            post_comment(repo_full_name, number, comment_body, github_token)
+            print(f"回収完了 ({mode_label}): {repo_full_name} #{number}")
+
+        except Exception as e:
+            has_error = True
+            safe_err = sanitize(str(e), gemini_key, github_token)[:400]
+            try:
+                set_exclusive_label(repo_full_name, number, FAILED_LABEL, github_token)
+                post_comment(repo_full_name, number, f"⚠️ 自動{mode_label}中断: `{safe_err}`", github_token)
+            except Exception:
+                pass
+            print(f"エラー: {repo_full_name} #{number} -> {safe_err}", file=sys.stderr)
+
+    return has_error, len(wip_items)
+
+
+def dispatch_new_items(owner: str, gemini_key: str, github_token: str) -> tuple[bool, int]:
+    """新規(auto-fix)のアイテムにタスクを投入する。(エラー有無, 処理件数)を返す"""
+    has_error = False
+    items = find_items_by_label(owner, TARGET_LABEL, github_token)
 
     for item in items:
         repo_api_url = item.get("repository_url", "")
@@ -382,32 +494,22 @@ def main():
                 head_info = pr_info.get("head") or {}
                 base_info = pr_info.get("base") or {}
                 head_repo_owner = ((head_info.get("repo") or {}).get("owner") or {}).get("login")
-
                 if head_repo_owner != owner:
-                    print(f"[{repo_full_name} #{number}] 外部フォークまたは削除済みリポジトリのPRのためスキップします。")
                     continue
-
                 base_branch = base_info.get("ref") or "main"
                 head_branch = head_info.get("ref")
                 if not head_branch:
                     raise RuntimeError("PRのブランチ名(head.ref)が取得できませんでした。")
-
                 files_summary, feedback = get_pr_context(repo_full_name, number, owner, github_token)
             else:
                 if (item.get("user") or {}).get("login") != owner:
-                    print(f"[{repo_full_name} #{number}] 外部ユーザーのIssueのためスキップします。")
                     continue
-
                 repo_info = github_api(repo_api_url, github_token) or {}
                 base_branch = repo_info.get("default_branch") or "main"
                 head_branch = f"fix/issue-{number}"
                 files_summary, feedback = "", ""
 
             before_sha = get_branch_sha(repo_full_name, head_branch, github_token)
-
-            print(f"開始 ({mode_label}): {repo_full_name} #{number}")
-            set_exclusive_label(repo_full_name, number, RUNNING_LABEL, github_token)
-
             prompt = build_prompt(
                 is_pr,
                 repo_full_name,
@@ -420,30 +522,20 @@ def main():
                 feedback,
                 github_token,
             )
-            raw_summary = execute_agent(gemini_key, repo_full_name, number, prompt)
-            summary = sanitize(raw_summary, gemini_key, github_token)
 
-            after_sha = get_branch_sha(repo_full_name, head_branch, github_token)
-            has_new_push = bool(after_sha and before_sha != after_sha)
-
-            if has_new_push and has_commits_ahead(repo_full_name, base_branch, head_branch, github_token):
-                if not is_pr:
-                    pr_url = ensure_pr_exists(
-                        repo_full_name, owner, base_branch, head_branch, number, title, summary, github_token
-                    )
-                    comment_body = f"✅ 自動{mode_label}完了\nPR: {pr_url}\n{summary}"
-                else:
-                    comment_body = f"✅ 自動{mode_label}完了 (`{after_sha[:7]}`)\n{summary}"
-            else:
-                comment_body = f"✅ 自動{mode_label}完了（コード変更なし）\n{summary}"
-
-            set_exclusive_label(repo_full_name, number, DONE_LABEL, github_token)
-            post_comment(repo_full_name, number, comment_body, github_token)
-            print(f"完了 ({mode_label}): {repo_full_name} #{number}")
+            interaction_id = start_agent_async(gemini_key, prompt)
+            set_exclusive_label(repo_full_name, number, RUNNING_LABEL, github_token)
+            post_comment(
+                repo_full_name,
+                number,
+                f"⏳ 自動{mode_label}を受け付けました（次回の巡回で完了を回収します）\n<!-- antigravity:id={interaction_id};sha={before_sha} -->",
+                github_token,
+            )
+            print(f"投入完了 ({mode_label}): {repo_full_name} #{number} -> ID={interaction_id}")
 
         except Exception as e:
             has_error = True
-            safe_err = sanitize(str(e), gemini_key, github_token)[:450]
+            safe_err = sanitize(str(e), gemini_key, github_token)[:400]
             try:
                 set_exclusive_label(repo_full_name, number, FAILED_LABEL, github_token)
                 post_comment(repo_full_name, number, f"⚠️ 自動{mode_label}中断: `{safe_err}`", github_token)
@@ -451,7 +543,140 @@ def main():
                 pass
             print(f"エラー: {repo_full_name} #{number} -> {safe_err}", file=sys.stderr)
 
-    if has_error:
+    return has_error, len(items)
+
+
+def run_autonomous_improvement(owner: str, gemini_key: str, github_token: str) -> bool:
+    """空き時間に全リポジトリから1つ選び、自律的に改善点を見つけてDraft PRを出す"""
+    if not ENABLE_AUTO_IMPROVE:
+        return False
+
+    now_jst = datetime.now(JST)
+    today_str = now_jst.strftime("%Y%m%d")
+    target_branch = f"chore/auto-improve-{today_str}"
+
+    # ユーザー所有の最新更新順リポジトリ一覧を取得
+    repos = github_api(
+        f"https://api.github.com/user/repos?affiliation=owner&sort=pushed&direction=desc&per_page=30",
+        github_token,
+    ) or []
+
+    candidates = []
+    already_created_today = 0
+
+    for r in repos:
+        if not isinstance(r, dict):
+            continue
+        if r.get("fork") or r.get("archived") or r.get("disabled"):
+            continue
+        name = r.get("name") or ""
+        full_name = r.get("full_name") or ""
+        topics = r.get("topics") or []
+        if not full_name or name == SELF_REPO_NAME or "auto-ignore" in topics:
+            continue
+        if (r.get("size") or 0) == 0:
+            continue
+
+        # 今日すでにこのリポジトリに自動改善ブランチが作られているか確認
+        if get_branch_sha(full_name, target_branch, github_token):
+            already_created_today += 1
+            continue
+
+        candidates.append(r)
+
+    if already_created_today >= MAX_AUTO_IMPROVE_PER_DAY:
+        print(f"自律お掃除モード: 本日の上限 ({MAX_AUTO_IMPROVE_PER_DAY}件) に到達済みのためスキップします。")
+        return False
+
+    if not candidates:
+        print("自律お掃除モード: 対象候補リポジトリなし")
+        return False
+
+    # 日付と時間に応じて候補をローテーション選択（同じリポジトリばかり偏らないようにする）
+    idx = (now_jst.day + now_jst.hour) % len(candidates)
+    target_repo = candidates[idx]
+    repo_full_name = target_repo["full_name"]
+    base_branch = target_repo.get("default_branch") or "main"
+
+    print(f"自律お掃除モード起動: {repo_full_name} (ブランチ: {target_branch})")
+
+    try:
+        prompt = build_auto_improve_prompt(repo_full_name, base_branch, target_branch, github_token)
+        interaction_id = start_agent_async(gemini_key, prompt)
+        print(f"自律お掃除タスク投入完了: {repo_full_name} -> ID={interaction_id}（最大8分間完了を待機してDraft PR化します）")
+
+        # 自律お掃除モードはIssueという「状態保存場所」が無いため、その場で完了まで見届けてDraft PR化する
+        # （司令塔リポジトリがPublicならActions時間は無制限のためコスト0円）
+        for _ in range(48):  # 最大8分待機
+            time.sleep(10)
+            status_obj = gemini_api(f"interactions/{interaction_id}", gemini_key, method="GET") or {}
+            status = status_obj.get("status")
+            if status in ("completed", "failed", "cancelled"):
+                break
+        else:
+            print(f"自律お掃除モード: {repo_full_name} が8分以内に完了しなかったため次回に持ち越します。")
+            return False
+
+        if status != "completed":
+            print(f"自律お掃除モード終了 (status={status}): {repo_full_name}")
+            return False
+
+        after_sha = get_branch_sha(repo_full_name, target_branch, github_token)
+        if not after_sha or not has_commits_ahead(repo_full_name, base_branch, target_branch, github_token):
+            print(f"自律お掃除モード: {repo_full_name} は改善不要（変更なし）と判断されました。")
+            return False
+
+        outputs = status_obj.get("outputs") or []
+        texts = [out.get("text", "").strip() for out in outputs if isinstance(out, dict) and out.get("text")]
+        raw_out = sanitize(texts[-1], gemini_key, github_token) if texts else ""
+
+        pr_title = f"自律コード品質改善 ({now_jst.strftime('%Y-%m-%d')})"
+        summary_lines = []
+        for line in raw_out.splitlines():
+            sline = line.strip()
+            if sline.startswith("タイトル:"):
+                pr_title = sline.replace("タイトル:", "").strip()[:60] or pr_title
+            elif sline:
+                summary_lines.append(sline)
+
+        summary_text = "\n".join(summary_lines[-6:]) or "コード品質およびテストカバレッジの改善を実施しました。"
+        pr_url = ensure_pr_exists(
+            repo_full_name,
+            owner,
+            base_branch,
+            target_branch,
+            0,
+            pr_title,
+            summary_text,
+            github_token,
+            draft=True,
+        )
+        print(f"✨ 自律お掃除Draft PR作成完了: {pr_url}")
+        return False
+
+    except Exception as e:
+        safe_err = sanitize(str(e), gemini_key, github_token)[:400]
+        print(f"自律お掃除モードエラー ({repo_full_name}): {safe_err}", file=sys.stderr)
+        return True
+
+
+def main():
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    github_token = os.environ.get("CROSS_REPO_TOKEN")
+    if not gemini_key or not github_token:
+        sys.exit("エラー: 環境変数が未設定です。")
+
+    owner = get_authenticated_user(github_token)
+
+    err1, wip_count = check_wip_items(owner, gemini_key, github_token)
+    err2, new_count = dispatch_new_items(owner, gemini_key, github_token)
+
+    err3 = False
+    # ユーザーからの依頼（WIPおよび新規auto-fix）がゼロの「空き時間」だけ自律お掃除を発動
+    if wip_count == 0 and new_count == 0:
+        err3 = run_autonomous_improvement(owner, gemini_key, github_token)
+
+    if err1 or err2 or err3:
         sys.exit(1)
 
 

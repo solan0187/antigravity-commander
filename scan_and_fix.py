@@ -18,7 +18,8 @@ MAX_COMMENT_PAGES = 20
 
 # --- 自律お掃除（Auto-Improve）＆ AI査読官設定 ---
 ENABLE_AUTO_IMPROVE = True
-MAX_AUTO_IMPROVE_PER_DAY = 2       # 1日あたりに自動作成するDraft PRの最大数
+MAX_AUTO_IMPROVE_PER_DAY = 1       # 1日あたりに自動作成するDraft PRの最大数
+AUTO_IMPROVE_HOURS_JST = {6}       # 自律お掃除を起動する時間帯（JST: 06:00〜06:59）
 ENABLE_AI_PR_REVIEW = True         # PR作成時にAI査読官による自動差分レビューコメントを投稿する
 REVIEW_MODELS = ["gemini-4-hydrogen", "gemini-pro-latest"]  # 左から順に試行し、通った最強モデルで査読する
 SELF_REPO_NAME = "antigravity-commander"
@@ -700,6 +701,11 @@ def dispatch_new_items(owner: str, gemini_key: str, github_token: str) -> tuple[
     return has_error, len(items)
 
 
+def is_auto_improve_window(now_jst: datetime) -> bool:
+    """自律お掃除を起動する時間帯（JST）かどうかを返す"""
+    return now_jst.hour in AUTO_IMPROVE_HOURS_JST
+
+
 def select_auto_improve_repo(candidates: list[dict], now_jst: datetime) -> dict:
     """15分スロットごとに候補リポジトリをローテーションして1件選ぶ"""
     slot = now_jst.day * 24 * 4 + now_jst.hour * 4 + (now_jst.minute // 15)
@@ -866,6 +872,9 @@ def run_autonomous_improvement(owner: str, gemini_key: str, github_token: str) -
         return False
 
     now_jst = datetime.now(JST)
+    if not is_auto_improve_window(now_jst):
+        return False
+
     today_str = now_jst.strftime("%Y%m%d")
     target_branch = f"chore/auto-improve-{today_str}"
 

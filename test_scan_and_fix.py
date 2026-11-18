@@ -203,6 +203,17 @@ class TestScanAndFix(unittest.TestCase):
             self.assertIn("git fetch origin", p)
             self.assertIn("NEVER print, log, or commit access tokens", p)
 
+    def test_is_auto_improve_window_only_allows_configured_jst_hours(self):
+        self.assertTrue(
+            scan_and_fix.is_auto_improve_window(datetime(2026, 11, 18, 6, 15, tzinfo=scan_and_fix.JST))
+        )
+        self.assertFalse(
+            scan_and_fix.is_auto_improve_window(datetime(2026, 11, 18, 5, 45, tzinfo=scan_and_fix.JST))
+        )
+        self.assertFalse(
+            scan_and_fix.is_auto_improve_window(datetime(2026, 11, 18, 7, 0, tzinfo=scan_and_fix.JST))
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

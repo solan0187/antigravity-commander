@@ -4,6 +4,8 @@
 - Separate pure business/calculation logic from UI components so core logic is easily unit-testable.
 - Never leave magic numbers or hardcoded strings in logic; extract them into named constants.
 - Prefer strict typing and explicit null/error handling over silent fallbacks or `any` / dynamic casts.
+- Match the existing codebase style and simplicity; avoid over-engineering, unnecessary abstractions, or redundant defensive checks for impossible states.
+- Do not add obvious comments that merely restate the code (only comment non-obvious "why"), and preserve existing unrelated comments.
 
 ## 2. Safety & Scope Guardrails
 - Keep diffs minimal and focused strictly on the requested issue or single improvement target.
@@ -12,4 +14,5 @@
 
 ## 3. Verification & Output
 - Always run the repository's existing linter, typechecker, and unit tests before pushing.
-- Write clear, concise commit messages and PR summaries in natural Japanese.
+- Never weaken assertions, skip failing tests, or fabricate test results to make a build pass; if tests cannot run, report honestly and do not push.
+- Write clear, concise commit messages and PR summaries in natural Japanese without emojis or filler phrases.

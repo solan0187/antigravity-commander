@@ -9,6 +9,7 @@ on:
 jobs:
   patrol:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     concurrency:
       group: antigravity-patrol
       cancel-in-progress: false
@@ -21,6 +22,9 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.13'
+
+      - name: ユニットテストの実行
+        run: python -m unittest -v test_scan_and_fix.py
 
       - name: 全リポジトリのIssue巡回・自動修正を実行
         env:

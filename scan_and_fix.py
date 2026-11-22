@@ -18,8 +18,7 @@ MAX_COMMENT_PAGES = 20
 
 # --- 自律お掃除（Auto-Improve）＆ AI査読官設定 ---
 ENABLE_AUTO_IMPROVE = True
-MAX_AUTO_IMPROVE_PER_DAY = 1       # 1日あたりに自動作成するDraft PRの最大数
-AUTO_IMPROVE_HOURS_JST = {6}       # 自律お掃除を起動する時間帯（JST: 06:00〜06:59）
+MAX_AUTO_IMPROVE_PER_DAY = 1       # 1日あたりに自律お掃除を実行する最大回数
 ENABLE_AI_PR_REVIEW = True         # PR作成時にAI査読官による自動差分レビューコメントを投稿する
 REVIEW_MODELS = ["gemini-4-hydrogen", "gemini-pro-latest"]  # 左から順に試行し、通った最強モデルで査読する
 SELF_REPO_NAME = "antigravity-commander"
@@ -701,19 +700,14 @@ def dispatch_new_items(owner: str, gemini_key: str, github_token: str) -> tuple[
     return has_error, len(items)
 
 
-def is_auto_improve_window(now_jst: datetime) -> bool:
-    """自律お掃除を起動する時間帯（JST）かどうかを返す"""
-    return now_jst.hour in AUTO_IMPROVE_HOURS_JST
-
-
 def select_auto_improve_repo(candidates: list[dict], now_jst: datetime) -> dict:
     """15分スロットごとに候補リポジトリをローテーションして1件選ぶ"""
     slot = now_jst.day * 24 * 4 + now_jst.hour * 4 + (now_jst.minute // 15)
     return candidates[slot % len(candidates)]
 
 
-def find_tracker_issue(owner: str, token: str) -> int:
-    """司令塔リポジトリ内の自律お掃除状態管理Issue番号を返す（無ければ0）"""
+def find_tracker_issue_obj(owner: str, token: str) -> dict | None:
+    """司令塔リポジトリ内の自律お掃除状態管理Issueオブジェクトを返す（無ければNone）"""
     self_repo = f"{owner}/{SELF_REPO_NAME}"
     issues = github_api(
         f"https://api.github.com/repos/{self_repo}/issues?state=open&per_page=30",
@@ -721,25 +715,60 @@ def find_tracker_issue(owner: str, token: str) -> int:
     ) or []
     for issue in issues:
         if isinstance(issue, dict) and "pull_request" not in issue and issue.get("title") == AUTO_IMPROVE_TRACKER_TITLE:
-            return int(issue.get("number") or 0)
-    return 0
+            return issue
+    return None
 
 
-def get_or_create_tracker_issue(owner: str, token: str) -> int:
-    existing = find_tracker_issue(owner, token)
+def find_tracker_issue(owner: str, token: str) -> int:
+    """司令塔リポジトリ内の自律お掃除状態管理Issue番号を返す（無ければ0）"""
+    issue = find_tracker_issue_obj(owner, token)
+    return int((issue or {}).get("number") or 0)
+
+
+def get_or_create_tracker_issue_obj(owner: str, token: str) -> dict:
+    existing = find_tracker_issue_obj(owner, token)
     if existing:
         return existing
     self_repo = f"{owner}/{SELF_REPO_NAME}"
-    created = github_api(
+    return github_api(
         f"https://api.github.com/repos/{self_repo}/issues",
         token,
         method="POST",
         data={
             "title": AUTO_IMPROVE_TRACKER_TITLE,
-            "body": "自律お掃除モード（Auto-Improve）が8分以内に完了しなかった場合の次回回収用トラッカーです。（自動管理）",
+            "body": "自律お掃除モード（Auto-Improve）の日次実行状態および持ち越し回収用トラッカーです。（自動管理）",
         },
     ) or {}
-    return int(created.get("number") or 0)
+
+
+def get_or_create_tracker_issue(owner: str, token: str) -> int:
+    issue = get_or_create_tracker_issue_obj(owner, token)
+    return int(issue.get("number") or 0)
+
+
+def get_last_auto_improve_date(tracker_issue: dict | None) -> str:
+    body = (tracker_issue or {}).get("body") or ""
+    m = re.search(r"<!-- antigravity:last-auto-improve-date=(\d{8}) -->", body)
+    return m.group(1) if m else ""
+
+
+def mark_auto_improve_ran_today(owner: str, tracker_issue: dict, today_str: str, token: str):
+    tracker_num = int(tracker_issue.get("number") or 0)
+    if not tracker_num:
+        return
+    marker = f"<!-- antigravity:last-auto-improve-date={today_str} -->"
+    body = tracker_issue.get("body") or ""
+    if re.search(r"<!-- antigravity:last-auto-improve-date=\d{8} -->", body):
+        new_body = re.sub(r"<!-- antigravity:last-auto-improve-date=\d{8} -->", marker, body)
+    else:
+        new_body = f"{body.rstrip()}\n{marker}" if body.strip() else marker
+    self_repo = f"{owner}/{SELF_REPO_NAME}"
+    github_api(
+        f"https://api.github.com/repos/{self_repo}/issues/{tracker_num}",
+        token,
+        method="PATCH",
+        data={"body": new_body},
+    )
 
 
 def finalize_auto_improve(
@@ -872,10 +901,13 @@ def run_autonomous_improvement(owner: str, gemini_key: str, github_token: str) -
         return False
 
     now_jst = datetime.now(JST)
-    if not is_auto_improve_window(now_jst):
+    today_str = now_jst.strftime("%Y%m%d")
+
+    tracker_issue = find_tracker_issue_obj(owner, github_token)
+    if get_last_auto_improve_date(tracker_issue) == today_str:
+        print(f"自律お掃除モード: 本日 ({today_str}) はすでに実行済みのためスキップします。")
         return False
 
-    today_str = now_jst.strftime("%Y%m%d")
     target_branch = f"chore/auto-improve-{today_str}"
 
     repos = github_api(
@@ -922,6 +954,8 @@ def run_autonomous_improvement(owner: str, gemini_key: str, github_token: str) -
     try:
         prompt = build_auto_improve_prompt(repo_full_name, base_branch, target_branch, github_token)
         interaction_id = start_agent_async(gemini_key, prompt)
+        tracker_issue = get_or_create_tracker_issue_obj(owner, github_token)
+        mark_auto_improve_ran_today(owner, tracker_issue, today_str, github_token)
         print(f"自律お掃除タスク投入完了: {repo_full_name} -> ID={interaction_id}（最大8分間完了を待機してDraft PR化します）")
 
         for _ in range(48):

@@ -203,16 +203,26 @@ class TestScanAndFix(unittest.TestCase):
             self.assertIn("git fetch origin", p)
             self.assertIn("NEVER print, log, or commit access tokens", p)
 
-    def test_is_auto_improve_window_only_allows_configured_jst_hours(self):
-        self.assertTrue(
-            scan_and_fix.is_auto_improve_window(datetime(2026, 11, 18, 6, 15, tzinfo=scan_and_fix.JST))
-        )
-        self.assertFalse(
-            scan_and_fix.is_auto_improve_window(datetime(2026, 11, 18, 5, 45, tzinfo=scan_and_fix.JST))
-        )
-        self.assertFalse(
-            scan_and_fix.is_auto_improve_window(datetime(2026, 11, 18, 7, 0, tzinfo=scan_and_fix.JST))
-        )
+    @patch("scan_and_fix.github_api")
+    def test_mark_auto_improve_ran_today_updates_marker_in_body(self, mock_gh):
+        issue = {"number": 12, "body": "トラッカー本文\n<!-- antigravity:last-auto-improve-date=20261121 -->"}
+        scan_and_fix.mark_auto_improve_ran_today("owner", issue, "20261122", "gtok")
+        _, kwargs = mock_gh.call_args
+        self.assertEqual(kwargs["method"], "PATCH")
+        self.assertIn("<!-- antigravity:last-auto-improve-date=20261122 -->", kwargs["data"]["body"])
+        self.assertEqual(scan_and_fix.get_last_auto_improve_date({"body": kwargs["data"]["body"]}), "20261122")
+
+    @patch("scan_and_fix.github_api")
+    @patch("scan_and_fix.find_tracker_issue_obj")
+    def test_run_autonomous_improvement_skips_when_already_ran_today(self, mock_find_issue, mock_gh):
+        today_str = datetime.now(scan_and_fix.JST).strftime("%Y%m%d")
+        mock_find_issue.return_value = {
+            "number": 12,
+            "body": f"<!-- antigravity:last-auto-improve-date={today_str} -->",
+        }
+        has_err = scan_and_fix.run_autonomous_improvement("owner", "gkey", "gtok")
+        self.assertFalse(has_err)
+        mock_gh.assert_not_called()
 
 
 if __name__ == "__main__":
